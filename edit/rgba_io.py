@@ -2,6 +2,28 @@ import numpy as np
 import torch
 from PIL import Image
 
+def preprocess_rgb(
+    image: Image.Image,
+    device: torch.device,
+    dtype: torch.dtype,
+    force_divisible_by: int = 16,
+):
+    """
+    PIL(RGB/RGBA) -> torch (1,3,H,W) in [-1,1]
+    """
+    image = image.convert("RGB")
+
+    w, h = image.size
+    w2 = w - (w % force_divisible_by)
+    h2 = h - (h % force_divisible_by)
+    if (w2, h2) != (w, h):
+        image = image.crop((0, 0, w2, h2))
+
+    arr = np.array(image).astype(np.float32) / 255.0  # [0,1], (H,W,3)
+    x = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)  # (1,3,H,W)
+    x = x * 2.0 - 1.0
+    return x.to(device=device, dtype=dtype)
+
 def preprocess_rgba(
     image: Image.Image,
     device: torch.device,

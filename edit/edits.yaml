@@ -2,29 +2,13 @@
 #     input_img:  example_images/input_rgba_o_0a5e5a64.png
 #     source_prompt: dog
 
-#     target_prompts:
-#     - cat
+#     target_prompts: cat
     
 #     target_codes:
 #     - dog
 
-- 
-
-    input_img:  example_images/input_rgba_o_0a0ae43d.png
-    source_prompt: deer
-
-    target_prompts:
-    - deer with hat
-
-    target_codes:
-    - deer
-
--
-    input_img:  example_images/input_rgba_o_0b7228ec.png
-    source_prompt: yellow deer
-
-    target_prompts:
-    - yellow deer with hat
-
-    target_codes:
-    - yellow deer
+- source_prompt: "dog"
+  target_prompts:
+    - "cat"
+  fg_rgba: "img/dog.png"
+  bg_rgb:  "img/road.png"
