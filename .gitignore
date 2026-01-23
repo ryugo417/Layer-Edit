@@ -1,2 +1,15 @@
-./models
-./results
+models/
+results/
+
+# Weights
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Images / outputs
+*.png
+*.jpg
+*.jpeg
+*.webp
