@@ -2,6 +2,7 @@ from diffusers import (
     AutoencoderKL,
     FluxPipeline,
 )
+from transformers import AutoTokenizer
 import argparse
 import torch
 from PIL import Image
@@ -79,10 +80,22 @@ def main(args):
         )
 
     weight_dtype = torch.bfloat16
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="tokenizer",
+        use_fast=False,
+    )
+    tokenizer_2 = AutoTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="tokenizer_2",
+        use_fast=True,
+    )
     pipeline = FluxPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         torch_dtype=weight_dtype,
         vae=vae,
+        tokenizer=tokenizer,
+        tokenizer_2=tokenizer_2,
     )
     # load attention processors
     pipeline.load_lora_weights(args.lora_path)
