@@ -654,3 +654,180 @@ def FlowEditFLUX_DUAL(
     out_fg = zt_edit_fg if n_min == 0 else xt_tar_fg
     out_fg = pipe._unpack_latents(out_fg, orig_height, orig_width, pipe.vae_scale_factor)
     return out_fg
+
+
+@torch.no_grad()
+def FlowEditFLUX_DUAL_BISTREAM(
+    pipe,
+    scheduler,
+    x_fg, x_scene,                 # (B,C,H,W)
+    src_prompt,
+    tar_prompt,
+    T_steps: int = 28,
+    n_avg: int = 1,
+    src_guidance_scale: float = 1.5,
+    tar_guidance_scale: float = 5.5,
+    n_min: int = 0,
+    n_max: int = 24,
+):
+    device = x_fg.device
+    latent_h, latent_w = x_fg.shape[2], x_fg.shape[3]
+    orig_height = latent_h * pipe.vae_scale_factor
+    orig_width  = latent_w * pipe.vae_scale_factor
+    num_channels_latents = pipe.transformer.config.in_channels // 4
+
+    # pack
+    fg_packed = pipe._pack_latents(x_fg, x_fg.shape[0], num_channels_latents, latent_h, latent_w)
+    sc_packed = pipe._pack_latents(x_scene, x_scene.shape[0], num_channels_latents, latent_h, latent_w)
+
+    # img_ids
+    ids_fg = pipe._prepare_latent_image_ids(
+        x_fg.shape[0],
+        latent_h // 2,
+        latent_w // 2,
+        device,
+        x_fg.dtype,
+    )
+    ids_sc = pipe._prepare_latent_image_ids(
+        x_scene.shape[0],
+        latent_h // 2,
+        latent_w // 2,
+        device,
+        x_scene.dtype,
+    )
+    ids_sc = _shift_stream_id(ids_sc, offset=1)
+
+    # timesteps
+    sigmas = np.linspace(1.0, 1 / T_steps, T_steps)
+    image_seq_len = fg_packed.shape[1] + sc_packed.shape[1]
+    mu = calculate_shift(
+        image_seq_len,
+        scheduler.config.base_image_seq_len,
+        scheduler.config.max_image_seq_len,
+        scheduler.config.base_shift,
+        scheduler.config.max_shift,
+    )
+    timesteps, T_steps = retrieve_timesteps(
+        scheduler,
+        T_steps,
+        device,
+        timesteps=None,
+        sigmas=sigmas,
+        mu=mu,
+    )
+    pipe._num_timesteps = len(timesteps)
+
+    # prompts
+    src_prompt_embeds, src_pooled, src_text_ids = pipe.encode_prompt(
+        prompt=src_prompt,
+        prompt_2=None,
+        device=device,
+    )
+    tar_prompt_embeds, tar_pooled, tar_text_ids = pipe.encode_prompt(
+        prompt=tar_prompt,
+        prompt_2=None,
+        device=device,
+    )
+
+    # guidance
+    if pipe.transformer.config.guidance_embeds:
+        src_guidance = torch.tensor([src_guidance_scale], device=device).expand(fg_packed.shape[0])
+        tar_guidance = torch.tensor([tar_guidance_scale], device=device).expand(fg_packed.shape[0])
+    else:
+        src_guidance = None
+        tar_guidance = None
+
+    zt_edit_fg = fg_packed.clone()
+    zt_edit_sc = sc_packed.clone()
+
+    xt_tar_fg = None
+    xt_tar_sc = None
+
+    for i, t in tqdm(enumerate(timesteps)):
+        if T_steps - i > n_max:
+            continue
+
+        scheduler._init_step_index(t)
+        t_i = scheduler.sigmas[scheduler.step_index]
+        if scheduler.step_index + 1 < len(scheduler.sigmas):
+            t_im1 = scheduler.sigmas[scheduler.step_index + 1]
+        else:
+            t_im1 = t_i
+
+        # ---- ODE edit phase ----
+        if T_steps - i > n_min:
+            Vd_fg = torch.zeros_like(fg_packed)
+            Vd_sc = torch.zeros_like(sc_packed)
+
+            for _ in range(n_avg):
+                noise = torch.randn_like(fg_packed)
+
+                zt_src_fg = (1 - t_i) * fg_packed + t_i * noise
+                zt_src_sc = (1 - t_i) * sc_packed + t_i * noise
+
+                zt_tar_fg = zt_edit_fg + zt_src_fg - fg_packed
+                zt_tar_sc = zt_edit_sc + zt_src_sc - sc_packed
+
+                V_src_fg, V_src_sc = calc_v_flux_dual(
+                    pipe,
+                    latents_fg=zt_src_fg,
+                    latents_bg=zt_src_sc,
+                    prompt_embeds=src_prompt_embeds,
+                    pooled_prompt_embeds=src_pooled,
+                    guidance=src_guidance,
+                    text_ids=src_text_ids,
+                    latent_image_ids_fg=ids_fg,
+                    latent_image_ids_bg=ids_sc,
+                    t=t,
+                )
+                V_tar_fg, V_tar_sc = calc_v_flux_dual(
+                    pipe,
+                    latents_fg=zt_tar_fg,
+                    latents_bg=zt_tar_sc,
+                    prompt_embeds=tar_prompt_embeds,
+                    pooled_prompt_embeds=tar_pooled,
+                    guidance=tar_guidance,
+                    text_ids=tar_text_ids,
+                    latent_image_ids_fg=ids_fg,
+                    latent_image_ids_bg=ids_sc,
+                    t=t,
+                )
+
+                Vd_fg += (V_tar_fg - V_src_fg) / n_avg
+                Vd_sc += (V_tar_sc - V_src_sc) / n_avg
+
+            zt_edit_fg = (zt_edit_fg.to(torch.float32) + (t_im1 - t_i) * Vd_fg).to(Vd_fg.dtype)
+            zt_edit_sc = (zt_edit_sc.to(torch.float32) + (t_im1 - t_i) * Vd_sc).to(Vd_sc.dtype)
+
+        # ---- SDEdit phase ----
+        else:
+            if xt_tar_fg is None:
+                noise = torch.randn_like(fg_packed)
+                xt_src_fg = scale_noise(scheduler, fg_packed, t, noise=noise)
+                xt_src_sc = scale_noise(scheduler, sc_packed, t, noise=noise)
+
+                xt_tar_fg = zt_edit_fg + xt_src_fg - fg_packed
+                xt_tar_sc = zt_edit_sc + xt_src_sc - sc_packed
+
+            V_tar_fg, V_tar_sc = calc_v_flux_dual(
+                pipe,
+                latents_fg=xt_tar_fg,
+                latents_bg=xt_tar_sc,
+                prompt_embeds=tar_prompt_embeds,
+                pooled_prompt_embeds=tar_pooled,
+                guidance=tar_guidance,
+                text_ids=tar_text_ids,
+                latent_image_ids_fg=ids_fg,
+                latent_image_ids_bg=ids_sc,
+                t=t,
+            )
+
+            xt_tar_fg = (xt_tar_fg.to(torch.float32) + (t_im1 - t_i) * V_tar_fg).to(V_tar_fg.dtype)
+            xt_tar_sc = (xt_tar_sc.to(torch.float32) + (t_im1 - t_i) * V_tar_sc).to(V_tar_sc.dtype)
+
+    out_fg = zt_edit_fg if n_min == 0 else xt_tar_fg
+    out_sc = zt_edit_sc if n_min == 0 else xt_tar_sc
+
+    out_fg = pipe._unpack_latents(out_fg, orig_height, orig_width, pipe.vae_scale_factor)
+    out_sc = pipe._unpack_latents(out_sc, orig_height, orig_width, pipe.vae_scale_factor)
+    return out_fg, out_sc

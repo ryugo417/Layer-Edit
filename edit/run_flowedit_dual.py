@@ -8,7 +8,7 @@ import yaml
 import os
 
 from rgba_io import preprocess_rgba, preprocess_rgb, latents_norm, latents_denorm, postprocess_rgba
-from FlowEdit_utils import FlowEditFLUX_DUAL, FlowEditFLUX
+from FlowEdit_utils import FlowEditFLUX_DUAL_BISTREAM, FlowEditFLUX
 
 def blend_fg_over_bg(fg_rgba_pil: Image.Image, bg_rgb_pil: Image.Image) -> Image.Image:
     fg = np.array(fg_rgba_pil).astype(np.float32) / 255.0  # (H,W,4)
@@ -86,18 +86,21 @@ def main():
             fg = preprocess_rgba(fg_pil, device=device, dtype=weight_dtype, force_divisible_by=16)  # (1,4,H,W) [-1,1]
             bg = preprocess_rgb(bg_pil, device=device, dtype=weight_dtype, force_divisible_by=16)   # (1,3,H,W) [-1,1]
 
-            # bgを VAE(4ch) に入れるため alpha=1 を付ける
+            # scene RGBA = αブレンドした見え（alpha=1）
+            fg01 = (fg * 0.5 + 0.5).clamp(0, 1)
             bg01 = (bg * 0.5 + 0.5).clamp(0, 1)
-            a1 = torch.ones((bg.shape[0], 1, bg.shape[2], bg.shape[3]), device=device, dtype=bg.dtype)
-            bg_rgba = torch.cat([bg01, a1], dim=1) * 2.0 - 1.0  # (1,4,H,W) [-1,1]
+            a = fg01[:, 3:4]
+            scene_rgb01 = fg01[:, :3] * a + bg01 * (1 - a)
+            a1 = torch.ones_like(a)
+            scene_rgba = torch.cat([scene_rgb01, a1], dim=1) * 2.0 - 1.0  # (1,4,H,W) [-1,1]
 
-            # encode fg/bg separately
+            # encode fg/scene separately
             with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=weight_dtype):
                 z_fg_denorm = pipe.vae.encode(fg).latent_dist.mode()
-                z_bg_denorm = pipe.vae.encode(bg_rgba).latent_dist.mode()
+                z_scene_denorm = pipe.vae.encode(scene_rgba).latent_dist.mode()
 
             x_fg = latents_norm(pipe, z_fg_denorm)
-            x_bg = latents_norm(pipe, z_bg_denorm)
+            x_scene = latents_norm(pipe, z_scene_denorm)
 
             for tar_num, tar_prompt in enumerate(tar_prompts):
                 # x_fg_out = FlowEditFLUX(
@@ -114,11 +117,11 @@ def main():
                 #     n_min=n_min,
                 #     n_max=n_max,
                 # )
-                x_fg_out = FlowEditFLUX_DUAL(
+                x_fg_out, x_scene_out = FlowEditFLUX_DUAL_BISTREAM(
                     pipe,
                     scheduler,
                     x_fg=x_fg,
-                    x_bg=x_bg,
+                    x_scene=x_scene,
                     src_prompt=src_prompt,
                     tar_prompt=tar_prompt,
                     T_steps=T_steps,
@@ -129,12 +132,19 @@ def main():
                     n_max=n_max,
                 )
 
-                # decode FG only
-                z_out_denorm = latents_denorm(pipe, x_fg_out)
+                # decode layer/scene
+                z_fg_out_denorm = latents_denorm(pipe, x_fg_out)
+                z_scene_out_denorm = latents_denorm(pipe, x_scene_out)
                 with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=weight_dtype):
-                    fg_rgba_out = pipe.vae.decode(z_out_denorm, return_dict=False)[0]  # (B,4,H,W) in [-1,1]
+                    fg_rgba_out = pipe.vae.decode(z_fg_out_denorm, return_dict=False)[0]      # (B,4,H,W) [-1,1]
+                    scene_rgba_out = pipe.vae.decode(z_scene_out_denorm, return_dict=False)[0] # (B,4,H,W) [-1,1]
 
-                fg_imgs = postprocess_rgba(fg_rgba_out)
+                alpha01 = (fg_rgba_out[:, 3:4] * 0.5 + 0.5).clamp(0, 1)
+                rgb01 = (scene_rgba_out[:, :3] * 0.5 + 0.5).clamp(0, 1)
+                rgb01 = rgb01 * (alpha01 > 0).to(rgb01.dtype)
+                out_rgba = torch.cat([rgb01, alpha01], dim=1) * 2.0 - 1.0
+
+                fg_imgs = postprocess_rgba(out_rgba)
                 fg_out_pil = fg_imgs[0]
 
                 save_dir = f"outputs/{exp_name}/FLUX_DUAL/fg_{os.path.basename(fg_path).split('.')[0]}/tar_{tar_num}"
