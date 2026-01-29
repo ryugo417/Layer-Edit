@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--exp_yaml", type=str, default="/home/eques/morita/AlphaVAE/edit/FLUX_exp.yaml")
 
     # 追加：AlphaVAE VAE + LoRA を指定できるようにする
-    parser.add_argument("--pretrained_model_name_or_path", type=str, default="/home/eques/morita/AlphaVAE/models/FLUX.1-dev")
+    parser.add_argument("--pretrained_model_name_or_path", type=str, default="/mnt/ssd1/eques/models/FLUX.1-dev")
     parser.add_argument("--pretrained_vae_path", type=str, default="/mnt/ssd1/eques/models/finetune_VAE", help="AlphaVAEのRGBA VAEのパス/ID")
     parser.add_argument("--lora_path", type=str, default="/mnt/ssd1/eques/models/finetune_VAE/finetune_diffusion", help="AlphaVAEのdiffusion LoRA（任意）")
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])

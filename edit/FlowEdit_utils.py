@@ -669,6 +669,7 @@ def FlowEditFLUX_DUAL_BISTREAM(
     tar_guidance_scale: float = 5.5,
     n_min: int = 0,
     n_max: int = 24,
+    fg_only_start_step: Optional[int] = None,
 ):
     device = x_fg.device
     latent_h, latent_w = x_fg.shape[2], x_fg.shape[3]
@@ -754,6 +755,8 @@ def FlowEditFLUX_DUAL_BISTREAM(
         else:
             t_im1 = t_i
 
+        use_fg_only = (fg_only_start_step is not None) and (i >= fg_only_start_step)
+
         # ---- ODE edit phase ----
         if T_steps - i > n_min:
             Vd_fg = torch.zeros_like(fg_packed)
@@ -768,30 +771,54 @@ def FlowEditFLUX_DUAL_BISTREAM(
                 zt_tar_fg = zt_edit_fg + zt_src_fg - fg_packed
                 zt_tar_sc = zt_edit_sc + zt_src_sc - sc_packed
 
-                V_src_fg, V_src_sc = calc_v_flux_dual(
-                    pipe,
-                    latents_fg=zt_src_fg,
-                    latents_bg=zt_src_sc,
-                    prompt_embeds=src_prompt_embeds,
-                    pooled_prompt_embeds=src_pooled,
-                    guidance=src_guidance,
-                    text_ids=src_text_ids,
-                    latent_image_ids_fg=ids_fg,
-                    latent_image_ids_bg=ids_sc,
-                    t=t,
-                )
-                V_tar_fg, V_tar_sc = calc_v_flux_dual(
-                    pipe,
-                    latents_fg=zt_tar_fg,
-                    latents_bg=zt_tar_sc,
-                    prompt_embeds=tar_prompt_embeds,
-                    pooled_prompt_embeds=tar_pooled,
-                    guidance=tar_guidance,
-                    text_ids=tar_text_ids,
-                    latent_image_ids_fg=ids_fg,
-                    latent_image_ids_bg=ids_sc,
-                    t=t,
-                )
+                if use_fg_only:
+                    V_src_fg = calc_v_flux(
+                        pipe,
+                        latents=zt_src_fg,
+                        prompt_embeds=src_prompt_embeds,
+                        pooled_prompt_embeds=src_pooled,
+                        guidance=src_guidance,
+                        text_ids=src_text_ids,
+                        latent_image_ids=ids_fg,
+                        t=t,
+                    )
+                    V_tar_fg = calc_v_flux(
+                        pipe,
+                        latents=zt_tar_fg,
+                        prompt_embeds=tar_prompt_embeds,
+                        pooled_prompt_embeds=tar_pooled,
+                        guidance=tar_guidance,
+                        text_ids=tar_text_ids,
+                        latent_image_ids=ids_fg,
+                        t=t,
+                    )
+                    V_src_sc = torch.zeros_like(zt_src_sc)
+                    V_tar_sc = torch.zeros_like(zt_tar_sc)
+                else:
+                    V_src_fg, V_src_sc = calc_v_flux_dual(
+                        pipe,
+                        latents_fg=zt_src_fg,
+                        latents_bg=zt_src_sc,
+                        prompt_embeds=src_prompt_embeds,
+                        pooled_prompt_embeds=src_pooled,
+                        guidance=src_guidance,
+                        text_ids=src_text_ids,
+                        latent_image_ids_fg=ids_fg,
+                        latent_image_ids_bg=ids_sc,
+                        t=t,
+                    )
+                    V_tar_fg, V_tar_sc = calc_v_flux_dual(
+                        pipe,
+                        latents_fg=zt_tar_fg,
+                        latents_bg=zt_tar_sc,
+                        prompt_embeds=tar_prompt_embeds,
+                        pooled_prompt_embeds=tar_pooled,
+                        guidance=tar_guidance,
+                        text_ids=tar_text_ids,
+                        latent_image_ids_fg=ids_fg,
+                        latent_image_ids_bg=ids_sc,
+                        t=t,
+                    )
 
                 Vd_fg += (V_tar_fg - V_src_fg) / n_avg
                 Vd_sc += (V_tar_sc - V_src_sc) / n_avg
@@ -808,22 +835,33 @@ def FlowEditFLUX_DUAL_BISTREAM(
 
                 xt_tar_fg = zt_edit_fg + xt_src_fg - fg_packed
                 xt_tar_sc = zt_edit_sc + xt_src_sc - sc_packed
-
-            V_tar_fg, V_tar_sc = calc_v_flux_dual(
-                pipe,
-                latents_fg=xt_tar_fg,
-                latents_bg=xt_tar_sc,
-                prompt_embeds=tar_prompt_embeds,
-                pooled_prompt_embeds=tar_pooled,
-                guidance=tar_guidance,
-                text_ids=tar_text_ids,
-                latent_image_ids_fg=ids_fg,
-                latent_image_ids_bg=ids_sc,
-                t=t,
-            )
-
-            xt_tar_fg = (xt_tar_fg.to(torch.float32) + (t_im1 - t_i) * V_tar_fg).to(V_tar_fg.dtype)
-            xt_tar_sc = (xt_tar_sc.to(torch.float32) + (t_im1 - t_i) * V_tar_sc).to(V_tar_sc.dtype)
+            if use_fg_only:
+                V_tar_fg = calc_v_flux(
+                    pipe,
+                    latents=xt_tar_fg,
+                    prompt_embeds=tar_prompt_embeds,
+                    pooled_prompt_embeds=tar_pooled,
+                    guidance=tar_guidance,
+                    text_ids=tar_text_ids,
+                    latent_image_ids=ids_fg,
+                    t=t,
+                )
+                xt_tar_fg = (xt_tar_fg.to(torch.float32) + (t_im1 - t_i) * V_tar_fg).to(V_tar_fg.dtype)
+            else:
+                V_tar_fg, V_tar_sc = calc_v_flux_dual(
+                    pipe,
+                    latents_fg=xt_tar_fg,
+                    latents_bg=xt_tar_sc,
+                    prompt_embeds=tar_prompt_embeds,
+                    pooled_prompt_embeds=tar_pooled,
+                    guidance=tar_guidance,
+                    text_ids=tar_text_ids,
+                    latent_image_ids_fg=ids_fg,
+                    latent_image_ids_bg=ids_sc,
+                    t=t,
+                )
+                xt_tar_fg = (xt_tar_fg.to(torch.float32) + (t_im1 - t_i) * V_tar_fg).to(V_tar_fg.dtype)
+                xt_tar_sc = (xt_tar_sc.to(torch.float32) + (t_im1 - t_i) * V_tar_sc).to(V_tar_sc.dtype)
 
     out_fg = zt_edit_fg if n_min == 0 else xt_tar_fg
     out_sc = zt_edit_sc if n_min == 0 else xt_tar_sc
